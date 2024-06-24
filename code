@@ -1,0 +1,110 @@
+import os
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from facenet_pytorch import InceptionResnetV1, MTCNN
+from torchvision import transforms
+from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
+
+# Definir las transformaciones de las imágenes
+transform = transforms.Compose([
+    transforms.Resize((160, 160)),  # FaceNet espera imágenes de 160x160 píxeles
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
+
+# Directorios con las fotos
+david_dir = r'C:\Users\carso\PycharmProjects\CARAS\DAVID\CarasDavid'
+others_dir = r'C:\Users\carso\PycharmProjects\CARAS\GENTE\Personas'
+
+# Dataset personalizado
+class FaceDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.images = [f for f in os.listdir(root_dir) if f.endswith(('.png', '.jpg', '.jpeg'))]
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root_dir, self.images[idx])
+        image = Image.open(img_name).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image
+
+# Crear los datasets
+david_dataset = FaceDataset(david_dir, transform=transform)
+others_dataset = FaceDataset(others_dir, transform=transform)
+
+# Combinar los datasets
+combined_dataset = torch.utils.data.ConcatDataset([david_dataset, others_dataset])
+
+# Crear etiquetas
+labels = [0] * len(david_dataset) + [1] * len(others_dataset)
+
+# Crear DataLoader
+dataloader = DataLoader(combined_dataset, batch_size=32, shuffle=False)
+
+# Cargar el modelo FaceNet preentrenado
+model = InceptionResnetV1(pretrained='vggface2').eval()
+
+# Crear una función para extraer embeddings
+def extract_embeddings(dataloader, model):
+    embeddings = []
+    with torch.no_grad():
+        for xb in dataloader:
+            xb = xb.to('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(xb.device)
+            embeddings.append(model(xb).cpu())
+    embeddings = torch.cat(embeddings)
+    return embeddings
+
+# Extraer embeddings
+embeddings = extract_embeddings(dataloader, model)
+
+# Identificar la cara de David
+david_idx = list(range(len(david_dataset)))
+other_idx = list(range(len(david_dataset), len(combined_dataset)))
+sampled_idx = np.random.choice(other_idx, min(24, len(other_idx)), replace=False).tolist() + david_idx
+
+# Crear un DataLoader para la muestra
+sample_sampler = SubsetRandomSampler(sampled_idx)
+sample_loader = DataLoader(combined_dataset, sampler=sample_sampler, batch_size=25)
+
+# Extraer embeddings de la muestra
+sample_embeddings = extract_embeddings(sample_loader, model)
+
+# Definir una función de comparación
+from scipy.spatial.distance import cosine
+
+def is_match(embedding1, embedding2, threshold=0.6):
+    return cosine(embedding1, embedding2) < threshold
+
+# Identificar la cara de David en la muestra
+david_embedding = embeddings[0]  # Asumimos que la primera imagen es de David
+identifications = ['David' if is_match(david_embedding, sample_embeddings[i]) else 'Other' for i in range(len(sample_embeddings))]
+
+# Mostrar los resultados
+def imshow(img, title):
+    img = img / 2 + 0.5  # unnormalize
+    npimg = img.numpy()
+    plt.imshow(np.transpose(npimg, (1, 2, 0)))
+    plt.title(title)
+    plt.show()
+
+# Crear un iterador del DataLoader para la muestra
+dataiter = iter(sample_loader)
+images = next(dataiter)
+
+# Mostrar las imágenes y las etiquetas identificadas
+for i in range(len(images)):
+    imshow(images[i], f"Identified as: {identifications[i]}")
+
+print(f"Total images processed: {len(combined_dataset)}")
+print(f"Images of David: {len(david_dataset)}")
+print(f"Images of others: {len(others_dataset)}")
